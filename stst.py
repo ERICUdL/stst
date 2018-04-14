@@ -8,6 +8,7 @@ from collections import OrderedDict
 from operator import itemgetter
 from os import listdir
 from os.path import isfile, join
+from csv import reader
 
 
 def query_from(q, f):
@@ -324,6 +325,29 @@ def gen_per_article(per_topic_dir):
 
 	return articles_tries
 
+def slda_res_prep(slda_topic_ids_fname, slda_res_fname):
+	topic_ids_df = pd.read_csv(slda_topic_ids_fname, sep=';', header=None)
+	topic_ids_dict = {}
+	for (value, key) in np.array(topic_ids_df, dtype=np.str).tolist():
+		topic_ids_dict[key] = value
+	slda = pd.read_csv(slda_res_fname, sep=';', index_col='Doc_index')
+	istex_ids = slda['Istex_Id']
+	Topics = np.array(slda['Topics'])
+	lda_out_res_dict = {}
+	for (istex_id, Topics) in np.array(slda).tolist():
+		topic_ids = Topics.split('_')
+		n_t_ids = len(topic_ids)
+		predicts = np.array(range(n_t_ids), dtype=np.object)
+		for (i, topic_id) in enumerate(topic_ids):
+			topic = [topic_ids_dict[topic_id]]
+			predict = {}
+			predict['score'] = 1.0
+			predict['topics'] = topic
+			predicts[i] = predict
+		lda_out_res_dict[istex_id] = predicts.tolist()
+
+	return lda_out_res_dict
+
 def eval_res(per_articl_res_output, per_articl_test_output):
 	#get intersection of istex_ids of both results and test
 	results_istex_ids = per_articl_res_output.keys()
@@ -378,9 +402,9 @@ def eval_res(per_articl_res_output, per_articl_test_output):
 		#test_label_cardinality
 		test_label_cardinality[i] = len(y_test[i])
 		#predict_label_density
-		predict_label_density[i] = len(y_predict[i]) / 35.0
+		#predict_label_density[i] = len(y_predict[i]) / 35.0
 		#test_label_density
-		test_label_density[i] = len(y_test[i]) / 35.0
+		#test_label_density[i] = len(y_test[i]) / 35.0
 		#link to the article
 		article_meta[i] = 'https://api.istex.fr/document/'+istex_id
 		article_pdf[i] = article_meta[i]+'/fulltext/pdf'
@@ -394,8 +418,267 @@ def eval_res(per_articl_res_output, per_articl_test_output):
 	evaluation['hamming'] = hamming
 	evaluation['predict_label_cardinality'] = predict_label_cardinality
 	evaluation['test_label_cardinality'] = test_label_cardinality
-	evaluation['predict_label_density'] = predict_label_density
-	evaluation['test_label_density'] = test_label_density
+	#evaluation['predict_label_density'] = predict_label_density
+	#evaluation['test_label_density'] = test_label_density
+	evaluation['article_meta'] = article_meta
+	evaluation['article_pdf'] = article_pdf
+
+	return evaluation
+
+def uu_combine_eval(per_articl_slda_output, per_articl_res_output, per_articl_test_output):
+	slda_istex_ids = per_articl_slda_output.keys()
+	results_istex_ids = per_articl_res_output.keys()
+	u_istex_ids = list_union(results_istex_ids,slda_istex_ids)
+	n_test = per_articl_test_output.keys()
+	intersection_lst = find_intersection(u_istex_ids, n_test)
+
+	#build a dataframe of y_predict and y_test for intersection_lst
+	evaluation = pd.DataFrame(data=intersection_lst, columns=["istex_id"])
+	m = len(intersection_lst)
+	y_predict = np.zeros(m, dtype=np.object)
+	y_test = np.zeros(m, dtype=np.object)
+	article_meta = np.zeros(m, dtype=np.object)
+	article_pdf = np.zeros(m, dtype=np.object)
+	is_predict_in_test = np.zeros(m, dtype=np.int)
+	jaccard = np.zeros(m, dtype=np.float16)
+	precision = np.zeros(m, dtype=np.float16)
+	recall = np.zeros(m, dtype=np.float16)
+	f1 = np.zeros(m, dtype=np.float16)
+	hamming = np.zeros(m, dtype=np.float16)
+	predict_label_cardinality = np.zeros(m, np.int)
+	test_label_cardinality = np.zeros(m, np.int)
+	#predict_label_density = np.zeros(m, np.int)
+	#test_label_density = np.zeros(m, np.int)
+
+	for (i, istex_id) in enumerate(intersection_lst):
+		#y_predict
+		topics = []
+		if istex_id not in slda_istex_ids:
+			for topic_dict in per_articl_res_output[istex_id]:
+				topics.append(topic_dict['topics'][0])
+		elif istex_id not in results_istex_ids:
+			for topic_dict in per_articl_slda_output[istex_id]:
+				topics.append(topic_dict['topics'][0])
+		else: #in both
+			for topic_dict in per_articl_slda_output[istex_id]:
+				topics.append(topic_dict['topics'][0])
+			for topic_dict in per_articl_slda_output[istex_id]:
+				topics.append(topic_dict['topics'][0])
+			topics = set(topics) #to get unique topics
+			topics = list(topics)
+		y_predict[i] = topics
+		#y_test
+		topics = []
+		for topic_dict in per_articl_test_output[istex_id]:
+			topics.append(topic_dict['topics'][0])
+		y_test[i] = topics
+		#is_predict_in_test?
+		intersection_len = len(find_intersection(y_predict[i], y_test[i])) * 1.0
+		if intersection_len > 0:
+			is_predict_in_test[i] = 1
+		else: is_predict_in_test[i] = 0
+		#jaccard
+		union_len = len(list_union(y_predict[i], y_test[i]))
+		jaccard[i] = intersection_len / union_len
+		#precision, recall and f1
+		precision[i] = intersection_len / len(y_predict[i])
+		recall[i] = intersection_len / len(y_test[i])
+		f1[i] = 2 * precision[i] * recall[i] / (precision[i] + recall[i])
+		#hamming (35 is the number of labels)
+		hamming[i] = len(list_xor(y_predict[i], y_test[i])) / 35.0
+		#predict_label_cardinality
+		predict_label_cardinality[i] = len(y_predict[i])
+		#test_label_cardinality
+		test_label_cardinality[i] = len(y_test[i])
+		#predict_label_density
+		#predict_label_density[i] = len(y_predict[i]) / 35.0
+		#test_label_density
+		#test_label_density[i] = len(y_test[i]) / 35.0
+		#link to the article
+		article_meta[i] = 'https://api.istex.fr/document/'+istex_id
+		article_pdf[i] = article_meta[i]+'/fulltext/pdf'
+	evaluation['y_predict'] = y_predict
+	evaluation['y_test'] = y_test
+	evaluation['is_predict_in_test'] = is_predict_in_test
+	evaluation['jaccard'] = jaccard
+	evaluation['precision'] = precision
+	evaluation['recall'] = recall
+	evaluation['f1'] = f1
+	evaluation['hamming'] = hamming
+	evaluation['predict_label_cardinality'] = predict_label_cardinality
+	evaluation['test_label_cardinality'] = test_label_cardinality
+	#evaluation['predict_label_density'] = predict_label_density
+	#evaluation['test_label_density'] = test_label_density
+	evaluation['article_meta'] = article_meta
+	evaluation['article_pdf'] = article_pdf
+
+	return evaluation
+
+def un_combine_eval(per_articl_slda_output, per_articl_res_output, per_articl_test_output):
+	slda_istex_ids = per_articl_slda_output.keys()
+	results_istex_ids = per_articl_res_output.keys()
+	u_istex_ids = list_union(results_istex_ids,slda_istex_ids)
+	n_test = per_articl_test_output.keys()
+	intersection_lst = find_intersection(u_istex_ids, n_test)
+
+	#build a dataframe of y_predict and y_test for intersection_lst
+	evaluation = pd.DataFrame(data=intersection_lst, columns=["istex_id"])
+	m = len(intersection_lst)
+	y_predict = np.zeros(m, dtype=np.object)
+	y_test = np.zeros(m, dtype=np.object)
+	article_meta = np.zeros(m, dtype=np.object)
+	article_pdf = np.zeros(m, dtype=np.object)
+	is_predict_in_test = np.zeros(m, dtype=np.int)
+	jaccard = np.zeros(m, dtype=np.float16)
+	precision = np.zeros(m, dtype=np.float16)
+	recall = np.zeros(m, dtype=np.float16)
+	f1 = np.zeros(m, dtype=np.float16)
+	hamming = np.zeros(m, dtype=np.float16)
+	predict_label_cardinality = np.zeros(m, np.int)
+	test_label_cardinality = np.zeros(m, np.int)
+	#predict_label_density = np.zeros(m, np.int)
+	#test_label_density = np.zeros(m, np.int)
+
+	for (i, istex_id) in enumerate(intersection_lst):
+		#y_predict
+		topics = []
+		if istex_id not in slda_istex_ids:
+			for topic_dict in per_articl_res_output[istex_id]:
+				topics.append(topic_dict['topics'][0])
+		elif istex_id not in results_istex_ids:
+			for topic_dict in per_articl_slda_output[istex_id]:
+				topics.append(topic_dict['topics'][0])
+		else: #in both
+			topics_slda = []
+			topics_res = []
+			for topic_dict in per_articl_slda_output[istex_id]:
+				topics_slda.append(topic_dict['topics'][0])
+			for topic_dict in per_articl_slda_output[istex_id]:
+				topics_res.append(topic_dict['topics'][0])
+			topics = find_intersection(topics_slda, topics_res)
+		y_predict[i] = topics
+		#y_test
+		topics = []
+		for topic_dict in per_articl_test_output[istex_id]:
+			topics.append(topic_dict['topics'][0])
+		y_test[i] = topics
+		#is_predict_in_test?
+		intersection_len = len(find_intersection(y_predict[i], y_test[i])) * 1.0
+		if intersection_len > 0:
+			is_predict_in_test[i] = 1
+		else: is_predict_in_test[i] = 0
+		#jaccard
+		union_len = len(list_union(y_predict[i], y_test[i]))
+		jaccard[i] = intersection_len / union_len
+		#precision, recall and f1
+		precision[i] = intersection_len / len(y_predict[i])
+		recall[i] = intersection_len / len(y_test[i])
+		f1[i] = 2 * precision[i] * recall[i] / (precision[i] + recall[i])
+		#hamming (35 is the number of labels)
+		hamming[i] = len(list_xor(y_predict[i], y_test[i])) / 35.0
+		#predict_label_cardinality
+		predict_label_cardinality[i] = len(y_predict[i])
+		#test_label_cardinality
+		test_label_cardinality[i] = len(y_test[i])
+		#predict_label_density
+		#predict_label_density[i] = len(y_predict[i]) / 35.0
+		#test_label_density
+		#test_label_density[i] = len(y_test[i]) / 35.0
+		#link to the article
+		article_meta[i] = 'https://api.istex.fr/document/'+istex_id
+		article_pdf[i] = article_meta[i]+'/fulltext/pdf'
+	evaluation['y_predict'] = y_predict
+	evaluation['y_test'] = y_test
+	evaluation['is_predict_in_test'] = is_predict_in_test
+	evaluation['jaccard'] = jaccard
+	evaluation['precision'] = precision
+	evaluation['recall'] = recall
+	evaluation['f1'] = f1
+	evaluation['hamming'] = hamming
+	evaluation['predict_label_cardinality'] = predict_label_cardinality
+	evaluation['test_label_cardinality'] = test_label_cardinality
+	#evaluation['predict_label_density'] = predict_label_density
+	#evaluation['test_label_density'] = test_label_density
+	evaluation['article_meta'] = article_meta
+	evaluation['article_pdf'] = article_pdf
+
+	return evaluation
+
+
+def eval_slda(per_articl_res_output, per_articl_test_output, per_articl_common_output):
+	#get intersection of istex_ids of both results and test
+	results_istex_ids = per_articl_res_output.keys()
+	test_istex_ids = per_articl_test_output.keys()
+	intersection_lst = find_intersection(results_istex_ids, test_istex_ids)
+	common_istex_ids = per_articl_common_output.keys()
+	intersection_lst = find_intersection(intersection_lst, common_istex_ids)
+
+	#build a dataframe of y_predict and y_test for intersection_lst
+	evaluation = pd.DataFrame(data=intersection_lst, columns=["istex_id"])
+	m = len(intersection_lst)
+	y_predict = np.zeros(m, dtype=np.object)
+	y_test = np.zeros(m, dtype=np.object)
+	article_meta = np.zeros(m, dtype=np.object)
+	article_pdf = np.zeros(m, dtype=np.object)
+	is_predict_in_test = np.zeros(m, dtype=np.int)
+	jaccard = np.zeros(m, dtype=np.float16)
+	precision = np.zeros(m, dtype=np.float16)
+	recall = np.zeros(m, dtype=np.float16)
+	f1 = np.zeros(m, dtype=np.float16)
+	hamming = np.zeros(m, dtype=np.float16)
+	predict_label_cardinality = np.zeros(m, np.int)
+	test_label_cardinality = np.zeros(m, np.int)
+	#predict_label_density = np.zeros(m, np.int)
+	#test_label_density = np.zeros(m, np.int)
+
+	for (i, istex_id) in enumerate(intersection_lst):
+		#y_predict
+		topics = []
+		for topic_dict in per_articl_res_output[istex_id]:
+			topics.append(topic_dict['topics'][0])
+		y_predict[i] = topics
+		#y_test
+		topics = []
+		for topic_dict in per_articl_test_output[istex_id]:
+			topics.append(topic_dict['topics'][0])
+		y_test[i] = topics
+		#is_predict_in_test?
+		intersection_len = len(find_intersection(y_predict[i], y_test[i])) * 1.0	
+		if intersection_len > 0:
+			is_predict_in_test[i] = 1
+		else: is_predict_in_test[i] = 0
+		#jaccard
+		union_len = len(list_union(y_predict[i], y_test[i]))
+		jaccard[i] = intersection_len / union_len
+		#precision, recall and f1
+		precision[i] = intersection_len / len(y_predict[i])
+		recall[i] = intersection_len / len(y_test[i])
+		f1[i] = 2 * precision[i] * recall[i] / (precision[i] + recall[i])
+		#hamming (35 is the number of labels)
+		hamming[i] = len(list_xor(y_predict[i], y_test[i])) / 35.0
+		#predict_label_cardinality
+		predict_label_cardinality[i] = len(y_predict[i])
+		#test_label_cardinality
+		test_label_cardinality[i] = len(y_test[i])
+		#predict_label_density
+		#predict_label_density[i] = len(y_predict[i]) / 35.0
+		#test_label_density
+		#test_label_density[i] = len(y_test[i]) / 35.0
+		#link to the article
+		article_meta[i] = 'https://api.istex.fr/document/'+istex_id
+		article_pdf[i] = article_meta[i]+'/fulltext/pdf'
+	evaluation['y_predict'] = y_predict
+	evaluation['y_test'] = y_test
+	evaluation['is_predict_in_test'] = is_predict_in_test
+	evaluation['jaccard'] = jaccard
+	evaluation['precision'] = precision
+	evaluation['recall'] = recall
+	evaluation['f1'] = f1
+	evaluation['hamming'] = hamming
+	evaluation['predict_label_cardinality'] = predict_label_cardinality
+	evaluation['test_label_cardinality'] = test_label_cardinality
+	#evaluation['predict_label_density'] = predict_label_density
+	#evaluation['test_label_density'] = test_label_density
 	evaluation['article_meta'] = article_meta
 	evaluation['article_pdf'] = article_pdf
 
@@ -411,9 +694,9 @@ def print_eval(evaluation):
 	hamming = evaluation['hamming']
 	predict_label_cardinality = evaluation['predict_label_cardinality']
 	test_label_cardinality = evaluation['test_label_cardinality']
-	predict_label_density = evaluation['predict_label_density']
-	test_label_density = evaluation['test_label_density']
-	print "number of compared articles for the baseline: ", str(m)
+	#predict_label_density = evaluation['predict_label_density']
+	#test_label_density = evaluation['test_label_density']
+	print "number of compared articles with the test set based on intersection: ", str(m)
 	print "intersection accuracy score = ",str(is_predict_in_test.sum()/ float(m))
 	print "mean Jaccard index = ",str(jaccard.sum()/ float(m))
 	print "mean precision = ",str(precision.sum()/ float(m))
@@ -422,16 +705,54 @@ def print_eval(evaluation):
 	print "hamming loss = ",str(hamming.sum()/ float(m))
 	print "predict_label_cardinality = ",str(predict_label_cardinality.sum()/ float(m))
 	print "test_label_cardinality = ",str(test_label_cardinality.sum()/ float(m))
-	print "predict_label_density = ",str(predict_label_density.sum()/ float(m))
-	print "test_label_density = ",str(test_label_density.sum()/ float(m))
+	#print "predict_label_density = ",str(predict_label_density.sum()/ float(m))
+	#print "test_label_density = ",str(test_label_density.sum()/ float(m))
+
+def decorate_slda_res(slda_topic_ids_fname, slda_istex_ids_fname, slda_score_res_fname):
+	#get topic id dictionary
+	topic_ids_df = pd.read_csv(slda_topic_ids_fname, sep=';', header=None)
+	topic_ids_dict = {}
+	for (value, key) in np.array(topic_ids_df, dtype=np.str).tolist():
+		topic_ids_dict[key] = value
+
+	#get an order list of istex_ids
+	istex_ids_df = pd.read_csv(slda_istex_ids_fname, sep=';')
+	istex_ids = istex_ids_df['Istex_Id'].tolist()
+
+	# read sLDA results
+	csv_reader = reader(open(slda_score_res_fname,'r'))
+	r = 0
+	lda_out_res_dict = {}
+	for row in csv_reader:
+		elements = str(row).split(';')[1:-1]
+		m = len(elements)
+		istex_id = istex_ids[r]
+		topics = []
+		for i in np.arange(0,m,2):
+			topics.append(topic_ids_dict[str(i)])
+		scores = []
+		for i in np.arange(1,m+1,2):
+			scores.append(elements[i])
+		predicts = []
+		for (i, topic) in enumerate(topics):
+			if float(scores[i]) > 0.1:
+				predict = {}
+				predict['score'] = scores[i]
+				predict['topics'] = [topic]
+				predicts.append(predict)
+			else:
+				continue
+		lda_out_res_dict[istex_id] = predicts
+		r+= 1
+	return lda_out_res_dict
+
 
 if __name__ == "__main__" :
 	parser = argparse.ArgumentParser()
-	parser.add_argument("--verbose", default=0, type=int)
-
+	parser.add_argument("--verbose", default=1, type=int)
 	parser.add_argument("--istex_benchmark_fname", default='data/istex_benchmark.p', type=str)
 	parser.add_argument("--istex_lda_csv_merged_fname", default='data/CSV_merged/', type=str)
-	parser.add_argument("--sslda", default=0, type=int)
+	parser.add_argument("--sslda", default=1, type=int)
 	parser.add_argument("--sslda_istex_ids_fname", default='data/sslda_istex_ids.p', type=str)
 	parser.add_argument("--svd_index_keys_fname", default='data/svd_index_keys.p', type=str)
 	parser.add_argument("--svd_index_fname", default='data/svd_inversed_index.json', type=str)
@@ -446,6 +767,11 @@ if __name__ == "__main__" :
 	parser.add_argument("--per_article_baseline_fname", default="per_article_baseline.p", type=str)
 	parser.add_argument("--per_article_baseline_eval_fname", default="baseline_eval.csv", type=str)
 	parser.add_argument("--per_article_eval_fname", default="evaluation.csv", type=str)
+	parser.add_argument("--slda_res_fname", default="data/sLDA_p30/Docs_idsCom33TopicsAllPrior.csv", type=str)
+	parser.add_argument("--slda_topic_ids_fname", default="data/sLDA_p30/TopicsIds.csv", type=str)
+	parser.add_argument("--per_article_slda_eval_fname", default="slda_p30_eval.csv", type=str)
+	parser.add_argument("--slda_istex_ids_fname", default="data/sLDA_p30/Docs_idsCom33TopicsAllPrior.csv", type=str)
+	parser.add_argument("--slda_score_res_fname", default="data/sLDA_p30/resultsComs33AllPrior.csv", type=str)
 
 	args = parser.parse_args()
 	verbose = args.verbose
@@ -474,6 +800,11 @@ if __name__ == "__main__" :
 	per_article_baseline_fname = args.per_article_baseline_fname
 	per_article_baseline_eval_fname = args.per_article_baseline_eval_fname
 	per_article_eval_fname = args.per_article_eval_fname
+	slda_res_fname = args.slda_res_fname
+	slda_topic_ids_fname =  args.slda_topic_ids_fname
+	per_article_slda_eval_fname = args.per_article_slda_eval_fname
+	slda_istex_ids_fname = args.slda_istex_ids_fname
+	slda_score_res_fname =  args.slda_score_res_fname
 
 	#load benchmark
 	if not os.path.exists(istex_benchmark_fname):	
@@ -602,6 +933,60 @@ if __name__ == "__main__" :
 		if verbose:
 			print "per article baseline file already exists and was successfully loaded"
 
+	#for slda
+	per_articl_slda_test = slda_res_prep(slda_topic_ids_fname, slda_res_fname)
+	per_articl_slda_output = decorate_slda_res(slda_topic_ids_fname, slda_istex_ids_fname, slda_score_res_fname)
+	if verbose:
+		print "per article slda file was successfully loaded"
+
+#################################################### Evaluation #############
+
+	#for U,U
+#	print "uu:"
+#	evaluation = uu_combine_eval(per_articl_slda_output, per_articl_res_output, per_articl_test_output)
+#	if verbose:
+#		print_eval(evaluation)
+#	uu_evaluation_out_fname = os.path.join(per_article_dir, 'uu_eval.csv')
+#	evaluation.to_csv(uu_evaluation_out_fname, sep=',', float_format=None,
+#	 columns=None, header=True, index=True, index_label='index')
+
+	#for u,n
+#	print "un:"
+#	evaluation = un_combine_eval(per_articl_slda_output, per_articl_res_output, per_articl_test_output)
+#	if verbose:
+#		print_eval(evaluation)
+#	un_evaluation_out_fname = os.path.join(per_article_dir, 'un_eval.csv')
+#	evaluation.to_csv(un_evaluation_out_fname, sep=',', float_format=None,
+#	 columns=None, header=True, index=True, index_label='index')
+
+	# slda evaluation
+	print "intersection with test and Fusion method results: sLDA method"
+	evaluation = eval_slda(per_articl_slda_output, per_articl_test_output, per_articl_res_output)
+	slda_evaluation_out_fname = os.path.join(per_article_dir, per_article_slda_eval_fname)
+	evaluation.to_csv(slda_evaluation_out_fname, sep=',', float_format=None,
+	 columns=None, header=True, index=True, index_label='index')
+	if verbose:
+		print_eval(evaluation)
+
+	# slda evaluation
+	print "intersection only with sLDA test: sLDA method"
+	evaluation = eval_res(per_articl_slda_output, per_articl_slda_test)
+	slda_evaluation_out_fname = os.path.join(per_article_dir, per_article_slda_eval_fname)
+	evaluation.to_csv(slda_evaluation_out_fname, sep=',', float_format=None,
+	 columns=None, header=True, index=True, index_label='index')
+	if verbose:
+		print_eval(evaluation)
+
+	# slda evaluation
+	print "intersection only with out test: sLDA method"
+	evaluation = eval_res(per_articl_slda_output, per_articl_test_output)
+	slda_evaluation_out_fname = os.path.join(per_article_dir, per_article_slda_eval_fname)
+	evaluation.to_csv(slda_evaluation_out_fname, sep=',', float_format=None,
+	 columns=None, header=True, index=True, index_label='index')
+	if verbose:
+		print_eval(evaluation)
+
+	print "intersection with test: Synset method"
 	# baseline evaluation (synset_es_results)
 	evaluation = eval_res(per_articl_basline_output, per_articl_test_output)
 	baseline_evaluation_out_fname = os.path.join(per_article_dir, per_article_baseline_eval_fname)
@@ -611,6 +996,16 @@ if __name__ == "__main__" :
 		print_eval(evaluation)
 
 	# our method evaluation
+	print "intersection with sLDA: Fusion n="+str(a)
+	evaluation = eval_slda(per_articl_res_output, per_articl_test_output, per_articl_slda_output)
+	res_evaluation_out_fname = os.path.join(per_article_dir, per_article_eval_fname)
+	evaluation.to_csv(res_evaluation_out_fname+'common_sLDA', sep=',', float_format=None,
+	 columns=None, header=True, index=True, index_label='index')
+	if verbose:
+		print_eval(evaluation)
+
+	# our method evaluation
+	print "intersection only with test-set: Fusion n="+str(a)
 	evaluation = eval_res(per_articl_res_output, per_articl_test_output)
 	res_evaluation_out_fname = os.path.join(per_article_dir, per_article_eval_fname)
 	evaluation.to_csv(res_evaluation_out_fname, sep=',', float_format=None,
