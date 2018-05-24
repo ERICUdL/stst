@@ -44,11 +44,11 @@ def list_xor(list_a, list_b):
 
 def term2url(string):
 	string = string.split(' ')
-	res = '%22'
+	res = ''
 	for s in string:
 		res = res + s + '%20'
 	res = res[:-3]
-	res = res + '%22'
+	#res = res + '%22'
 	return res
 
 def babel_synset(synset):
